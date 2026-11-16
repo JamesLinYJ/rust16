@@ -2,6 +2,10 @@
 use crate::machine::Segment;
 
 pub fn record(mbr: bool) -> Result<Vec<u8>, String> {
+    record_at(mbr, 0x300)
+}
+
+pub fn record_at(mbr: bool, loader: u16) -> Result<Vec<u8>, String> {
     let mut s = Segment::default();
     s.emit(&[0xeb, 88, 0x90]);
     s.bytes.resize(90, 0);
@@ -17,6 +21,10 @@ pub fn record(mbr: bool) -> Result<Vec<u8>, String> {
         0xfb, 0x88, 0x16, 0x10, 8, 0xbf, 0, 8, 0xb9, 8, 0, 0x31, 0xc0, 0xf3, 0xab, 0xc6, 0x06, 0,
         8, 16, 0xc6, 0x06, 2, 8, 1,
     ]);
+    if !mbr && loader < 0x300 {
+        // The contiguous IO.SYS read may span the original VBR stack at 0000:2ff0.
+        s.emit(&[0xfa, 0xb8, 0, 0x20, 0x8e, 0xd0, 0xbc, 0xf0, 0xff, 0xfb]);
+    }
     if mbr {
         s.emit(&[0xbe, 0xbe, 7, 0xb9, 4, 0]);
         s.label("part");
@@ -32,7 +40,20 @@ pub fn record(mbr: bool) -> Result<Vec<u8>, String> {
     } else {
         // The formatter writes IO.SYS's first absolute sector and sector count.
         s.emit(&[
-            0xbe, 0xa0, 7, 0xbf, 8, 8, 0xa5, 0xa5, 0xad, 0x89, 0xc1, 0xb8, 0, 3,
+            0xbe,
+            0xa0,
+            7,
+            0xbf,
+            8,
+            8,
+            0xa5,
+            0xa5,
+            0xad,
+            0x89,
+            0xc1,
+            0xb8,
+            loader as u8,
+            (loader >> 8) as u8,
         ]);
     }
     s.emit(&[0xa3, 6, 8, 0x89, 0x0e, 0x12, 8, 0x09, 0xc9]);
@@ -78,7 +99,7 @@ pub fn record(mbr: bool) -> Result<Vec<u8>, String> {
     s.label("launch");
     s.emit(&[0x8a, 0x16, 0x10, 8, 0xea]);
     s.word(if mbr { 0x7c00 } else { 0 });
-    s.word(if mbr { 0 } else { 0x300 });
+    s.word(if mbr { 0 } else { loader });
     s.label("fail");
     s.emit(&[0xcd, 0x18, 0xeb, 0xfe]);
     let mut bytes = s.resolve()?;

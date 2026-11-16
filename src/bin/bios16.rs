@@ -5,6 +5,16 @@ fn main() -> ExitCode {
         [flag, out] if flag == "--mbr" || flag == "--vbr" => {
             rust16::boot_record::record(flag == "--mbr").map(|b| (out, b))
         }
+        [flag, seg, out] if flag == "--vbr-at" => u16::from_str_radix(seg, 16)
+            .map_err(|e| e.to_string())
+            .and_then(|p| {
+                if (0x100..=0x300).contains(&p) {
+                    rust16::boot_record::record_at(false, p)
+                } else {
+                    Err("invalid IO.SYS load paragraph".into())
+                }
+            })
+            .map(|b| (out, b)),
         [flag, out] if flag == "--dos-io" => rust16::firmware::utilities().map(|b| (out, b)),
         [out] => rust16::firmware::object(true).map(|b| (out, b)),
         [flag, out] if flag == "--loader" => rust16::firmware::object(false).map(|b| (out, b)),
