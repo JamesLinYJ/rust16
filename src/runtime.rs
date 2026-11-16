@@ -96,7 +96,7 @@ pub fn object() -> Result<Vec<u8>, String> {
     s.relative(0xe9, "arg_char");
     s.label("arg_end");
     s.emit(&[0x5d, 0xcb]);
-    for (name, write) in [("input", false), ("output", true)] {
+    for (name, write) in [("input", false), ("output", true), ("append", true)] {
         frame(&mut s, name);
         s.emit(&[0x8b, 0x46, if write { 8 } else { 6 }]);
         s.relative(0xe8, "bank");
@@ -104,23 +104,30 @@ pub fn object() -> Result<Vec<u8>, String> {
         s.emit(&[0x89, 0xd7]);
         if write {
             s.emit(&[0x8b, 0x4e, 6, 0x49, 0x83, 0x7e, 6, 0]);
-            s.branch(0x74, "write_size_ok");
+            s.branch(0x74, &format!("{name}/size_ok"));
             s.emit(&[0x39, 0xf9]);
             s.branch(0x77, "bad_bank");
-            s.label("write_size_ok");
+            s.label(&format!("{name}/size_ok"));
         }
         s.emit(&[0x8b, 0x46, if write { 10 } else { 8 }]);
         s.relative(0xe8, "argv");
         s.emit(&[0x89, 0xf2, 0x09, 0xd2]);
         s.branch(0x74, "bad_arg");
-        if write {
+        if name == "append" {
+            s.emit(&[0xb8, 2, 0x3d]);
+        } else if write {
             s.emit(&[0x31, 0xc9, 0xb4, 0x3c]);
         } else {
             s.emit(&[0xb8, 0, 0x3d]);
         }
         s.emit(&[0xcd, 0x21]);
         s.branch(0x72, "bad_io");
-        s.emit(&[0x89, 0xc3, 0x1e, 0x06, 0x1f, 0x31, 0xd2]);
+        s.emit(&[0x89, 0xc3]);
+        if name == "append" {
+            s.emit(&[0xb8, 2, 0x42, 0x31, 0xc9, 0x31, 0xd2, 0xcd, 0x21]);
+            s.branch(0x72, "bad_io");
+        }
+        s.emit(&[0x1e, 0x06, 0x1f, 0x31, 0xd2]);
         if write {
             s.emit(&[0x8b, 0x4e, 6, 0xb4, 0x40]);
         } else {

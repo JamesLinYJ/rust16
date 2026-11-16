@@ -4,7 +4,7 @@ use crate::machine::Segment;
 
 const KERNEL_STACK: u16 = 0x6000;
 
-fn function(s: &mut Segment, name: &str, body: &[u8]) {
+pub(crate) fn function(s: &mut Segment, name: &str, body: &[u8]) {
     s.public(name);
     s.emit(&[0x55, 0x89, 0xe5]); // push bp; mov bp,sp
     s.emit(body);
@@ -64,16 +64,7 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
         "bios_reset",
         &[0x31, 0xc0, 0x8a, 0x16, 0, 0, 0xcd, 0x13],
     );
-    function(
-        &mut s,
-        "mem_byte",
-        &[0x8e, 0x46, 8, 0x8b, 0x5e, 6, 0x31, 0xc0, 0x26, 0x8a, 7],
-    );
-    function(
-        &mut s,
-        "mem_store",
-        &[0x8e, 0x46, 10, 0x8b, 0x5e, 8, 0x8b, 0x46, 6, 0x26, 0x88, 7],
-    );
+    memory(&mut s);
     s.public("bios_char");
     s.emit(&[0x55, 0x89, 0xe5, 0x8b, 0x46, 6]);
     s.relative(0xe8, "tty");
@@ -171,7 +162,21 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
         let imm = from + 2;
         s.bytes[imm..imm + 2].copy_from_slice(&((handler - from) as u16).to_le_bytes());
     }
-    crate::bios_disk::emit(&mut s);
+    if !kernel {
+        s.public("bind_resident_io");
+        s.emit(&[0xe8, 0, 0, 0x5b, 0xb8, 0xa0, 0x37, 0x8e, 0xc0]);
+        let here = s.bytes.len() - 6;
+        s.emit(&[
+            0x2e, 0x8b, 0x47, 0, 0x26, 0xa3, 0, 0, 0x2e, 0x8b, 0x47, 0, 0x26, 0xa3, 2, 0, 0xcb,
+        ]);
+        let field = s.bytes.len() + 1;
+        s.bytes[here + 9] = (field - here) as u8;
+        s.bytes[here + 17] = (field + 2 - here) as u8;
+        s.far_call("io_dispatch");
+    }
+    s.public("resident_io");
+    s.emit(&[0xb8, 0xa0, 0x37, 0x8e, 0xc0, 0x26, 0xff, 0x2e, 0, 0]);
+    crate::real_io::emit(&mut s);
     crate::literals::emit(&mut s);
     s.finish()
 }
@@ -241,4 +246,23 @@ pub fn sector(stage_sectors: u8) -> Result<Vec<u8>, String> {
     bytes[62..62 + code.len()].swap_with_slice(&mut code);
     bytes[510..].copy_from_slice(&[0x55, 0xaa]);
     Ok(bytes)
+}
+
+fn memory(s: &mut Segment) {
+    function(
+        s,
+        "mem_byte",
+        &[0x8e, 0x46, 8, 0x8b, 0x5e, 6, 0x31, 0xc0, 0x26, 0x8a, 7],
+    );
+    function(
+        s,
+        "mem_store",
+        &[0x8e, 0x46, 10, 0x8b, 0x5e, 8, 0x8b, 0x46, 6, 0x26, 0x88, 7],
+    );
+}
+pub fn utilities() -> Result<Vec<u8>, String> {
+    let mut s = Segment::default();
+    memory(&mut s);
+    crate::real_io::emit(&mut s);
+    s.finish()
 }

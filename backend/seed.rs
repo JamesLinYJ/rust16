@@ -13,6 +13,7 @@ mod rt {
         pub fn fetch(bank: u16, index: u16) -> u16;
         pub fn save(bank: u16, index: u16, value: u16) -> u16;
         pub fn input(arg: u16, bank: u16) -> u16;
+        pub fn append(arg:u16,bank:u16,len:u16)->u16;
         pub fn output(arg: u16, bank: u16, len: u16) -> u16;
         pub fn arg(number: u16, index: u16) -> u16;
         pub fn putch(byte: u16) -> u16;
@@ -31,6 +32,7 @@ macro_rules! intrinsic {
 intrinsic!(fetch(bank,index)->u16);
 intrinsic!(save(bank,index,value)->u16);
 intrinsic!(input(arg,bank)->u16);
+intrinsic!(append(arg,bank,len)->u16);
 intrinsic!(output(arg,bank,len)->u16);
 intrinsic!(arg(number,index)->u16);
 intrinsic!(putch(byte)->u16);

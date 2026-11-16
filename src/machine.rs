@@ -38,10 +38,7 @@ impl Segment {
         self.calls.push((self.bytes.len(), name.into()));
         self.emit(&[0; 4]);
     }
-    pub fn finish(mut self) -> Result<Vec<u8>, String> {
-        if self.bytes.len() > 59900 || self.calls.len() > 3900 {
-            return Err("segment exceeds OMF writer limits".into());
-        }
+    fn fix_branches(&mut self) -> Result<(), String> {
         for (p, name) in self.branches.drain(..) {
             let dest = *self
                 .labels
@@ -50,6 +47,17 @@ impl Segment {
             self.bytes[p..p + 2]
                 .copy_from_slice(&((dest as u16).wrapping_sub(p as u16 + 2)).to_le_bytes());
         }
+        Ok(())
+    }
+    pub fn resolve(mut self) -> Result<Vec<u8>, String> {
+        self.fix_branches()?;
+        Ok(self.bytes)
+    }
+    pub fn finish(mut self) -> Result<Vec<u8>, String> {
+        if self.bytes.len() > 59900 || self.calls.len() > 3900 {
+            return Err("segment exceeds OMF writer limits".into());
+        }
+        self.fix_branches()?;
         super::compiler::pack(&self)
     }
 }

@@ -24,6 +24,19 @@ fn getidx() -> u16 {
     set(60, p + 2);
     return (a & 127) * 256 + fetch(0, p + 1);
 }
+// Two 60 KiB banks hold the segmented load image. Normalize paragraph:offset
+// before choosing the backing bank, including fixups across a bank boundary.
+fn image_byte(base: u16, at: u16, value: u16) -> u16 {
+    let para: u16 = base + at / 16;
+    if para < 3840 { save(1, para * 16 + at % 16, value); }
+    else { save(6, (para - 3840) * 16 + at % 16, value); }
+    return 0;
+}
+fn image_word(base:u16, at:u16, value:u16)->u16 {
+    image_byte(base, at, value % 256);
+    image_byte(base, at + 1, value / 256);
+    return 0;
+}
 fn module(ai: u16, pass: u16) -> u16 {
     let size: u16 = input(ai, 0);
     let mut p: u16 = 0;
@@ -60,7 +73,7 @@ fn module(ai: u16, pass: u16) -> u16 {
                 fail(52);
             }
             length = word(0, q + 1);
-            if length > 65000 - base * 16 {
+            if length > 65000 || base + (length + 15) / 16 > 7680 {
                 fail(53);
             }
             ns = 1;
@@ -128,7 +141,8 @@ fn module(ai: u16, pass: u16) -> u16 {
                 fail(53);
             }
             if pass == 1 {
-                moveb(0, q + 2, 1, base * 16 + last, count);
+                let mut k: u16 = 0;
+                while k < count { image_byte(base, last+k, fetch(0,q+2+k)); k=k+1; }
             }
         } else if kind == 156 {
             while q < end {
@@ -151,8 +165,8 @@ fn module(ai: u16, pass: u16) -> u16 {
                         fail(56);
                     }
                     let at: u16 = last + d;
-                    setw(1, base * 16 + at, word(3, id * 6 + 4));
-                    setw(1, base * 16 + at + 2, word(4, id * 2));
+                    image_word(base, at, word(3, id * 6 + 4));
+                    image_word(base, at + 2, word(4, id * 2));
                     let ri: u16 = st(46);
                     if ri >= 4000 {
                         fail(53);
@@ -205,27 +219,17 @@ pub fn main16() -> u16 {
     let n: u16 = st(46);
     let hdr: u16 = (28 + n * 4 + 15) / 16;
     let img: u16 = st(40);
-    if img + hdr > 4094 {
-        fail(53);
-    }
-    let len: u16 = (hdr + img) * 16;
-    setw(6, 0, 23117);
-    setw(6, 2, len % 512);
-    setw(6, 4, len / 512);
-    if len % 512 != 0 {
-        setw(6, 4, len / 512 + 1);
-    }
-    setw(6, 6, n);
-    setw(6, 8, hdr);
-    setw(6, 10, 1024);
-    setw(6, 12, 1024);
-    setw(6, 14, img);
-    setw(6, 16, 16384);
-    setw(6, 20, st(54));
-    setw(6, 22, st(52));
-    setw(6, 24, 28);
-    moveb(9, 0, 6, 28, n * 4);
-    moveb(1, 0, 6, hdr * 16, img * 16);
-    output(ai + 1, 6, len);
+    let mut clear: u16 = 0;
+    while clear < hdr*16 { save(0,clear,0); clear=clear+1; }
+    let paras:u16=hdr+img;
+    setw(0,0,23117);
+    setw(0,2,(paras % 32)*16);
+    setw(0,4,(paras+31)/32);
+    setw(0,6,n); setw(0,8,hdr); setw(0,10,1024); setw(0,12,1024);
+    setw(0,14,img); setw(0,16,16384); setw(0,20,st(54)); setw(0,22,st(52)); setw(0,24,28);
+    moveb(9,0,0,28,n*4);
+    output(ai+1,0,hdr*16);
+    if img > 3840 {append(ai+1,1,61440);append(ai+1,6,(img-3840)*16);}
+    else {append(ai+1,1,img*16);}
     return 0;
 }

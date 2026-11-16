@@ -103,6 +103,12 @@ impl CodegenBackend for Dos16 {
             }
             let id = instance.def_id();
             let name = symbol(tcx, instance);
+            if matches!(instance.def, rustc_middle::ty::InstanceKind::Intrinsic(_)) {
+                sess.dcx().span_fatal(
+                    tcx.def_span(id),
+                    format!("unsupported rust16 intrinsic: {name}"),
+                );
+            }
             let body = instance.instantiate_mir_and_normalize_erasing_regions(
                 tcx,
                 TypingEnv::fully_monomorphized(),
@@ -228,6 +234,9 @@ impl CodegenBackend for Dos16 {
                 _ => sess
                     .dcx()
                     .fatal(format!("unknown real-mode runtime {platform}")),
+            }
+            if let Some(objects) = std::env::var_os("RUST16_OBJECTS") {
+                cmd.args(std::env::split_paths(&objects).filter(|p| !p.as_os_str().is_empty()));
             }
             for m in &modules.modules {
                 cmd.arg(m.object.as_ref().unwrap());

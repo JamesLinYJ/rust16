@@ -23,6 +23,8 @@ fingerprint.update(platform.encode())
 artifacts = [plugin, linker, out/"libcore.rlib", out/"libcompiler_builtins.rlib"]
 if platform == "dos":
     artifacts.append(runtime)
+extra = [Path(p).resolve() for p in os.environ.get("RUST16_OBJECTS", "").split(os.pathsep) if p]
+artifacts.extend(extra)
 for artifact in artifacts:
     fingerprint.update(artifact.read_bytes())
 flags = ["-Zalways-encode-mir", f"-Ldependency={out}", "-Zunstable-options", f"-Zcodegen-backend={plugin}", f"-Ctarget-cpu={cpu}", f'--cfg=rust16_cpu="{cpu}"',
@@ -51,6 +53,7 @@ if not has_manifest:
         sys.exit("no Cargo.toml in this directory or its parents")
     args.extend(["--manifest-path",str(manifest)])
 env["RUST16_PLATFORM"] = platform
+env["RUST16_OBJECTS"] = os.pathsep.join(map(str, extra))
 os.chdir(root)
 os.execve(cargo,[cargo,"build","-Zjson-target-spec","--config","target.dos16.rustflags="+json.dumps(flags),
                 "--target",str(root/"backend/dos16.json"),*args],env)

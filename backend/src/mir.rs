@@ -15,8 +15,46 @@ struct Frame<'a, 'tcx> {
     slots: Slots,
 }
 impl<'tcx> Frame<'_, 'tcx> {
+    fn scale_index(&mut self, stride: u64) -> Result<(), String> {
+        let n = u16::try_from(stride).map_err(|_| "array stride exceeds segment")?;
+        match n {
+            0 => self.code.emit(&[0x31, 0xf6]),
+            1 => (),
+            2 | 4 => {
+                self.code.emit(&[0xd1, 0xe6]);
+                if n == 4 {
+                    self.code.emit(&[0xd1, 0xe6]);
+                }
+            }
+            _ if self.cpu >= 286 => {
+                self.code.emit(&[0x69, 0xf6]);
+                self.code.word(n);
+            }
+            _ => {
+                self.code.emit(&[0x50, 0x52, 0xb8]);
+                self.code.word(n);
+                self.code.emit(&[0xf7, 0xe6, 0x89, 0xc6, 0x5a, 0x58]);
+            }
+        }
+        Ok(())
+    }
     // Return the near address in BX. SS and DS alias for this ABI.
     fn addr(&mut self, p: Place<'tcx>) -> Result<(), String> {
+        if let Some((last, prefix)) = p.projection.split_last() {
+            if let ProjectionElem::Index(idx) = last {
+                let base = Place {
+                    local: p.local,
+                    projection: self.tcx.mk_place_elems(prefix),
+                };
+                self.addr(base)?;
+                let stride = layout(self.tcx, p.ty(self.body, self.tcx).ty)?.size.bytes();
+                self.code.emit(&[0x8b, 0xb6]);
+                self.code.word(self.slots.offsets[idx.as_usize()] as u16);
+                self.scale_index(stride)?;
+                self.code.emit(&[1, 0xf3]);
+                return Ok(());
+            }
+        }
         if let [ProjectionElem::Deref, tail @ ..] = p.projection.as_slice() {
             self.code.emit(&[0x8b, 0x9e]);
             self.code
@@ -40,12 +78,7 @@ impl<'tcx> Frame<'_, 'tcx> {
                         let stride = layout(self.tcx, ty)?.size.bytes();
                         self.code.emit(&[0x8b, 0xb6]);
                         self.code.word(self.slots.offsets[index.as_usize()] as u16);
-                        match stride {
-                            1 => (),
-                            2 => self.code.emit(&[0xd1, 0xe6]),
-                            4 => self.code.emit(&[0xd1, 0xe6, 0xd1, 0xe6]),
-                            _ => return Err("index stride".into()),
-                        }
+                        self.scale_index(stride)?;
                         self.code.emit(&[0x01, 0xf3]);
                     }
                     ProjectionElem::ConstantIndex {
@@ -69,7 +102,9 @@ impl<'tcx> Frame<'_, 'tcx> {
         Ok(())
     }
     fn place(&mut self, p: Place<'tcx>, op: u8) -> Result<(), String> {
-        if matches!(p.projection.first(), Some(ProjectionElem::Deref)) {
+        if matches!(p.projection.first(), Some(ProjectionElem::Deref))
+            || matches!(p.projection.last(), Some(ProjectionElem::Index(_)))
+        {
             self.addr(p)?;
             let size = layout(self.tcx, p.ty(self.body, self.tcx).ty)?.size.bytes();
             if size == 0 {
@@ -107,6 +142,70 @@ impl<'tcx> Frame<'_, 'tcx> {
         Ok(())
     }
     fn assign(&mut self, p: Place<'tcx>, r: &Rvalue<'tcx>) -> Result<(), String> {
+        if let Rvalue::Repeat(value, count) = r {
+            let count = count
+                .try_to_target_usize(self.tcx)
+                .ok_or("array repeat length")?;
+            let stride = layout(self.tcx, value.ty(self.body, self.tcx))?
+                .size
+                .bytes();
+            if stride > 2 {
+                self.addr(p)?;
+                self.code.emit(&[0x53]);
+                match value {
+                    Operand::Move(place) | Operand::Copy(place) => {
+                        self.addr(*place)?;
+                        self.code.emit(&[0x89, 0xd8]);
+                    }
+                    Operand::Constant(c) => {
+                        let ConstValue::Indirect { alloc_id, offset } = c
+                            .const_
+                            .eval(self.tcx, ty::TypingEnv::fully_monomorphized(), c.span)
+                            .map_err(|_| "repeated constant")?
+                        else {
+                            return Err("unsupported repeated constant".into());
+                        };
+                        let alloc = self.tcx.global_alloc(alloc_id).unwrap_memory().inner();
+                        if !alloc.provenance().ptrs().is_empty() {
+                            return Err("relocatable repeated element".into());
+                        }
+                        let at = offset.bytes_usize();
+                        let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(
+                            at..at + stride as usize,
+                        );
+                        if bytes.iter().all(|b| *b == 0) {
+                            self.code.emit(&[0x5f, 0x1e, 0x07, 0x31, 0xc0, 0xb9]);
+                            self.code.word((stride * count) as u16);
+                            self.code.emit(&[0xf3, 0xaa]);
+                            return Ok(());
+                        }
+                        self.literal(bytes);
+                    }
+                    _ => return Err("unsupported repeated operand".into()),
+                }
+                self.code.emit(&[0x5f, 0x1e, 0x07]);
+                if count == 0 {
+                    return Ok(());
+                }
+                self.code.emit(&[0xba]);
+                self.code.word(count as u16);
+                self.code.emit(&[0x89, 0xc6, 0xb9]);
+                self.code.word(stride as u16);
+                self.code.emit(&[0xf3, 0xa4, 0x4a, 0x75, 0xf6]);
+                return Ok(());
+            }
+            self.addr(p)?;
+            self.code.emit(&[0x53]);
+            self.operand(value)?;
+            self.code.emit(&[0x5f, 0x1e, 0x07, 0xb9]);
+            self.code.word(count as u16);
+            match stride {
+                1 => self.code.emit(&[0xf3, 0xaa]),
+                2 => self.code.emit(&[0xf3, 0xab]),
+                _ => return Err("unsupported repeated element width".into()),
+            }
+            return Ok(());
+        }
         if let Rvalue::Use(v, _) = r {
             let size = layout(self.tcx, p.ty(self.body, self.tcx).ty)?.size.bytes();
             if size > 4 {
@@ -168,8 +267,21 @@ impl<'tcx> Frame<'_, 'tcx> {
                 _ => return Err(format!("unsupported aggregate {kind:?}")),
             };
             for (field, operand) in fields.iter_enumerated() {
-                self.operand(operand)?;
                 let offset = data.fields.offset(field.as_usize()).bytes() as i16;
+                let width = data.field(&cx, field.as_usize()).size.bytes();
+                if width > 4 {
+                    match operand {
+                        Operand::Copy(src) | Operand::Move(src) => self.addr(*src)?,
+                        _ => return Err("large aggregate field source".into()),
+                    }
+                    self.code.emit(&[0x89, 0xde, 0x8d, 0xbe]);
+                    self.code.word((at + offset) as u16);
+                    self.code.emit(&[0x1e, 0x07, 0xb9]);
+                    self.code.word(width as u16);
+                    self.code.emit(&[0xf3, 0xa4]);
+                    continue;
+                }
+                self.operand(operand)?;
                 transfer(
                     self.code,
                     at + offset,
@@ -207,6 +319,30 @@ impl<'tcx> Frame<'_, 'tcx> {
                         .map_err(|e| format!("constant: {e:?}"))?
                     {
                         ConstValue::ZeroSized => 0,
+                        ConstValue::Scalar(rustc_middle::mir::interpret::Scalar::Ptr(ptr, _)) => {
+                            let (prov, off) = ptr.into_raw_parts();
+                            let size = layout(
+                                self.tcx,
+                                c.const_
+                                    .ty()
+                                    .builtin_deref(true)
+                                    .ok_or("literal pointer type")?,
+                            )?
+                            .size
+                            .bytes_usize();
+                            let alloc = self
+                                .tcx
+                                .global_alloc(prov.alloc_id())
+                                .unwrap_memory()
+                                .inner();
+                            if !alloc.provenance().ptrs().is_empty() || size > 0xafa {
+                                return Err("unsupported literal pointer".into());
+                            }
+                            self.literal(alloc.inspect_with_uninit_and_ptr_outside_interpreter(
+                                off.bytes_usize()..off.bytes_usize() + size,
+                            ));
+                            return Ok(());
+                        }
                         ConstValue::Slice { alloc_id, meta } => {
                             if meta > 0xafa {
                                 return Err("literal exceeds DOS near-data pool".into());
@@ -265,6 +401,25 @@ impl<'tcx> Frame<'_, 'tcx> {
     fn rvalue(&mut self, r: &Rvalue<'tcx>) -> Result<(), String> {
         match r {
             Rvalue::Use(v, _) => self.operand(v)?,
+            Rvalue::Cast(
+                CastKind::PointerCoercion(rustc_middle::ty::adjustment::PointerCoercion::Unsize, _),
+                v,
+                _,
+            ) => {
+                let src = v
+                    .ty(self.body, self.tcx)
+                    .builtin_deref(true)
+                    .ok_or("unsize pointee")?;
+                let ty::Array(_, n) = src.kind() else {
+                    return Err("unsupported unsizing".into());
+                };
+                let count = n
+                    .try_to_target_usize(self.tcx)
+                    .ok_or("unknown array length")?;
+                self.operand(v)?;
+                self.code.emit(&[0xba]);
+                self.code.word(count as u16);
+            }
             Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
                 self.addr(*p)?;
                 self.code.emit(&[0x89, 0xd8]);
@@ -493,6 +648,9 @@ impl<'tcx> Frame<'_, 'tcx> {
                 self.operand(v)?;
                 self.code.emit(&[0x89, 0xd0]);
             }
+            Rvalue::Cast(CastKind::PtrToPtr, v, to) if layout(self.tcx, *to)?.size.bytes() == 2 => {
+                self.operand(v)?
+            }
             Rvalue::Cast(CastKind::Transmute | CastKind::PtrToPtr, v, ty)
                 if layout(self.tcx, *ty)?.size
                     == layout(self.tcx, v.ty(self.body, self.tcx))?.size =>
@@ -558,7 +716,13 @@ pub fn function<'tcx>(
         }
         match &data.terminator().kind {
             TerminatorKind::Return => {
-                if !body.return_ty().is_unit() {
+                let result = layout(tcx, body.return_ty())?.size.bytes();
+                if result > 4 {
+                    f.addr(Place::from(RETURN_PLACE))?;
+                    f.code.emit(&[0x89, 0xde, 0x8b, 0x7e, 6, 0x1e, 0x07, 0xb9]);
+                    f.code.word(result as u16);
+                    f.code.emit(&[0xf3, 0xa4]);
+                } else if !body.return_ty().is_unit() {
                     f.place(Place::from(RETURN_PLACE), 0x8b)?;
                 }
                 if cpu >= 286 {
@@ -626,13 +790,19 @@ pub fn function<'tcx>(
                     }
                     f.code.emit(&[0x50]);
                 }
+                let indirect = layout(tcx, destination.ty(body, tcx).ty)?.size.bytes() > 4;
+                if indirect {
+                    f.addr(*destination)?;
+                    f.code.emit(&[0x53]);
+                    pushed += 2;
+                }
                 f.code.far_call(&super::symbol(tcx, instance));
                 if pushed != 0 {
                     f.code.emit(&[0x81, 0xc4]);
                     f.code.word(pushed as u16);
                 }
                 if let Some(dest) = target {
-                    if !destination.ty(body, tcx).ty.is_unit() {
+                    if !indirect && !destination.ty(body, tcx).ty.is_unit() {
                         f.place(*destination, 0x89)?;
                     }
                     f.code.relative(0xe9, &label(*dest));

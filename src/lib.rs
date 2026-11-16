@@ -1,9 +1,11 @@
 //! Host implementation of the byte workspace and DOS-facing compiler services.
 //! The same compiler and linker sources are compiled to DOS by the seed.
 mod bios_disk;
+pub mod boot_record;
 pub mod firmware;
 mod literals;
 pub mod machine;
+mod real_io;
 pub mod runtime;
 use std::cell::RefCell;
 use std::fs;
@@ -81,6 +83,23 @@ fn output(n: u16, b: u16, len: u16) -> u16 {
         eprintln!("{p}: {e}");
         fail(13)
     });
+    0
+}
+fn append(n: u16, b: u16, len: u16) -> u16 {
+    use std::io::Write;
+    let p = path(n);
+    valid(b, len.saturating_sub(1));
+    CTX.with_borrow_mut(|c| {
+        let bank = &mut c.banks[b as usize];
+        if bank.len() < len as usize {
+            bank.resize(len as usize, 0)
+        }
+        fs::OpenOptions::new()
+            .append(true)
+            .open(p)?
+            .write_all(&bank[..len as usize])
+    })
+    .unwrap_or_else(|_| fail(13));
     0
 }
 fn putch(v: u16) -> u16 {

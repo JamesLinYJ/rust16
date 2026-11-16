@@ -20,7 +20,11 @@ pub struct Slots {
 impl Slots {
     pub fn new<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Result<Self, String> {
         let mut offsets = vec![0; body.local_decls.len()];
-        let mut args = 6i32;
+        let mut args = if layout(tcx, body.return_ty())?.size.bytes() > 4 {
+            8i32
+        } else {
+            6i32
+        };
         let mut frame = 0i32;
         for (i, decl) in body.local_decls.iter_enumerated().rev() {
             let bytes = layout(tcx, decl.ty)?.size.bytes();
@@ -86,6 +90,20 @@ pub fn address<'tcx>(
             ProjectionElem::Field(field, _) => {
                 at += data.fields.offset(field.as_usize()).bytes() as i16;
                 data = data.field(&cx, field.as_usize());
+            }
+            ProjectionElem::ConstantIndex {
+                offset,
+                from_end: false,
+                ..
+            } => {
+                let element = data.ty.builtin_index().ok_or("constant array index")?;
+                data = layout(tcx, element)?;
+                at = at
+                    .checked_add(
+                        i16::try_from(offset * data.size.bytes())
+                            .map_err(|_| "constant index exceeds near frame")?,
+                    )
+                    .ok_or("constant index outside frame")?;
             }
             _ => return Err(format!("unsupported place {p:?}")),
         }

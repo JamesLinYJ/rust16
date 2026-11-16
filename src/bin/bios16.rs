@@ -2,6 +2,10 @@ use std::{env, fs, process::ExitCode};
 fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
     let output = match args.as_slice() {
+        [flag, out] if flag == "--mbr" || flag == "--vbr" => {
+            rust16::boot_record::record(flag == "--mbr").map(|b| (out, b))
+        }
+        [flag, out] if flag == "--dos-io" => rust16::firmware::utilities().map(|b| (out, b)),
         [out] => rust16::firmware::object(true).map(|b| (out, b)),
         [flag, out] if flag == "--loader" => rust16::firmware::object(false).map(|b| (out, b)),
         [out, count] => count
