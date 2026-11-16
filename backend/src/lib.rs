@@ -78,7 +78,7 @@ impl CodegenBackend for Dos16 {
             .crate_types()
             .contains(&rustc_structures::CrateType::Executable);
         if !standalone && !executable {
-            return Box::new(Vec::<u8>::new());
+            return Box::new(Vec::<Vec<u8>>::new());
         }
         let mut queue = Vec::new();
         for local in tcx.hir_body_owners() {
@@ -91,10 +91,15 @@ impl CodegenBackend for Dos16 {
                 queue.push(Instance::mono(tcx, id));
             }
         }
+        let mut objects = Vec::new();
         let mut emitted = std::collections::HashSet::new();
         while let Some(instance) = queue.pop() {
             if !emitted.insert(instance) {
                 continue;
+            }
+            if !standalone && seg.bytes.len() >= 16 * 1024 {
+                let complete = std::mem::take(&mut seg);
+                objects.push(complete.finish().unwrap_or_else(|e| sess.dcx().fatal(e)));
             }
             let id = instance.def_id();
             let name = symbol(tcx, instance);
@@ -108,7 +113,8 @@ impl CodegenBackend for Dos16 {
                     .span_fatal(tcx.def_span(id), format!("{name}: {e}"));
             }
         }
-        Box::new(seg.finish().unwrap_or_else(|e| sess.dcx().fatal(e)))
+        objects.push(seg.finish().unwrap_or_else(|e| sess.dcx().fatal(e)));
+        Box::new(objects)
     }
     fn join_codegen(
         &self,
@@ -118,51 +124,44 @@ impl CodegenBackend for Dos16 {
         out: &OutputFilenames,
         _: &CrateInfo,
     ) -> (CompiledModules, WorkProductMap) {
-        let obj = *ongoing.downcast::<Vec<u8>>().unwrap();
-        let wants_object = sess.opts.output_types.contains_key(&OutputType::Object);
+        let objects = *ongoing.downcast::<Vec<Vec<u8>>>().unwrap();
+        let standalone = sess.opts.output_types.contains_key(&OutputType::Object);
         let linking = sess.opts.output_types.contains_key(&OutputType::Exe);
-        if !wants_object && !linking {
-            sess.dcx()
-                .fatal("rust16 supports OMF object or executable output");
-        }
-        let obj_output = out.path(OutputType::Object);
-        if wants_object && obj_output.is_stdout() {
-            use std::io::Write;
-            if let Err(e) = std::io::stdout().lock().write_all(&obj) {
-                sess.dcx().fatal(format!("writing OMF object: {e}"));
+        let mut modules = Vec::new();
+        for (index, obj) in objects.into_iter().enumerate() {
+            let output = out.path(OutputType::Object);
+            if standalone && output.is_stdout() {
+                use std::io::Write;
+                std::io::stdout()
+                    .lock()
+                    .write_all(&obj)
+                    .unwrap_or_else(|e| sess.dcx().fatal(format!("writing OMF: {e}")));
+                if !linking {
+                    continue;
+                }
             }
-            if !linking {
-                return (
-                    CompiledModules {
-                        modules: vec![],
-                        allocator_module: None,
-                    },
-                    Default::default(),
-                );
-            }
+            let name = format!("dos16-{index}");
+            let path = if standalone && !output.is_stdout() {
+                output.file_for_writing(out, OutputType::Object, &name)
+            } else {
+                out.temp_path_for_cgu(OutputType::Object, &name)
+            };
+            std::fs::write(&path, obj)
+                .unwrap_or_else(|e| sess.dcx().fatal(format!("writing OMF: {e}")));
+            modules.push(rustc_codegen_ssa::CompiledModule {
+                name,
+                kind: rustc_codegen_ssa::ModuleKind::Regular,
+                object: Some(path),
+                global_asm_object: None,
+                dwarf_object: None,
+                bytecode: None,
+                assembly: None,
+                llvm_ir: None,
+            });
         }
-        let path = if wants_object {
-            out.path(OutputType::Object)
-                .file_for_writing(out, OutputType::Object, "dos16")
-        } else {
-            out.temp_path_for_cgu(OutputType::Object, "dos16")
-        };
-        if let Err(e) = std::fs::write(&path, obj) {
-            sess.dcx().fatal(format!("writing OMF object: {e}"));
-        }
-        let module = rustc_codegen_ssa::CompiledModule {
-            name: "dos16".into(),
-            kind: rustc_codegen_ssa::ModuleKind::Regular,
-            object: Some(path),
-            global_asm_object: None,
-            dwarf_object: None,
-            bytecode: None,
-            assembly: None,
-            llvm_ir: None,
-        };
         (
             CompiledModules {
-                modules: vec![module],
+                modules,
                 allocator_module: None,
             },
             Default::default(),

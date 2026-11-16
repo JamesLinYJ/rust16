@@ -1,8 +1,8 @@
 //! Host implementation of the byte workspace and DOS-facing compiler services.
 //! The same compiler and linker sources are compiled to DOS by the seed.
+mod bios_disk;
 pub mod firmware;
 mod literals;
-mod bios_disk;
 pub mod machine;
 pub mod runtime;
 use std::cell::RefCell;

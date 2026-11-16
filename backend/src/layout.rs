@@ -51,8 +51,13 @@ pub fn transfer(code: &mut Segment, at: i16, bytes: u64, store: bool) -> Result<
             code.emit(if high { &[0x31, 0xd2] } else { &[0x31, 0xc0] });
         }
         let opcode = (if store { 0x88 } else { 0x8a }) + u8::from(width == 2);
-        code.emit(&[opcode, if high { 0x96 } else { 0x86 }]);
-        code.word(offset as u16);
+        let register = if high { 0x10 } else { 0 };
+        if let Ok(short) = i8::try_from(offset) {
+            code.emit(&[opcode, 0x46 | register, short as u8]);
+        } else {
+            code.emit(&[opcode, 0x86 | register]);
+            code.word(offset as u16);
+        }
     };
     if bytes > 4 {
         return Err(format!("{bytes}-byte register transfer unsupported"));
