@@ -1,0 +1,13 @@
+[package]
+name = "rustc_codegen_rust16"
+edition = "2024"
+version = "0.1.0"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+rust16 = { path = ".." }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

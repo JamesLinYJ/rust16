@@ -1,0 +1,78 @@
+--- a/library/core/src/hint.rs
++++ b/library/core/src/hint.rs
+@@ -278,7 +278,7 @@
+             // consistent behavior across targets, this custom function is used.
+             miri_spin_loop();
+         }
+-        target_arch = "x86" => {
++        all(target_arch = "x86", not(target_pointer_width = "16")) => {
+             // SAFETY: the `cfg` attr ensures that we only execute this on x86 targets.
+             crate::arch::x86::_mm_pause()
+         }
+--- a/library/stdarch/crates/core_arch/src/mod.rs
++++ b/library/stdarch/crates/core_arch/src/mod.rs
+@@ -35,7 +35,7 @@
+     /// Platform-specific intrinsics for the `x86` platform.
+     ///
+     /// See the [module documentation](../index.html) for more details.
+-    #[cfg(any(target_arch = "x86", doc))]
++    #[cfg(any(all(target_arch = "x86", not(target_pointer_width = "16")), doc))]
+     #[doc(cfg(target_arch = "x86"))]
+     #[stable(feature = "simd_x86", since = "1.27.0")]
+     pub mod x86 {
+@@ -340,7 +340,7 @@
+     }
+ }
+ 
+-#[cfg(any(target_arch = "x86", target_arch = "x86_64", doc))]
++#[cfg(any(all(target_arch = "x86", not(target_pointer_width = "16")), target_arch = "x86_64", doc))]
+ #[doc(cfg(any(target_arch = "x86", target_arch = "x86_64")))]
+ mod x86;
+ #[cfg(any(target_arch = "x86_64", doc))]
+--- a/library/portable-simd/crates/core_simd/src/swizzle_dyn.rs
++++ b/library/portable-simd/crates/core_simd/src/swizzle_dyn.rs
+@@ -28,7 +28,7 @@
+         use core::arch::wasm32 as wasm;
+         #[cfg(target_arch = "wasm64")]
+         use core::arch::wasm64 as wasm;
+-        #[cfg(target_arch = "x86")]
++        #[cfg(all(target_arch = "x86", not(target_pointer_width = "16")))]
+         use core::arch::x86;
+         #[cfg(target_arch = "x86_64")]
+         use core::arch::x86_64 as x86;
+@@ -255,13 +255,13 @@
+ ///
+ /// # Safety
+ /// This requires AVX2 to work
+-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++#[cfg(any(all(target_arch = "x86", not(target_pointer_width = "16")), target_arch = "x86_64"))]
+ #[target_feature(enable = "avx2")]
+ #[allow(unused)]
+ #[inline]
+ #[allow(clippy::let_and_return)]
+ unsafe fn avx2_pshufb(bytes: Simd<u8, 32>, idxs: Simd<u8, 32>) -> Simd<u8, 32> {
+-    #[cfg(target_arch = "x86")]
++    #[cfg(all(target_arch = "x86", not(target_pointer_width = "16")))]
+     use core::arch::x86;
+     #[cfg(target_arch = "x86_64")]
+     use core::arch::x86_64 as x86;
+@@ -343,7 +343,7 @@
+ }
+ 
+ /// Make indices that yield 0 for x86
+-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++#[cfg(any(all(target_arch = "x86", not(target_pointer_width = "16")), target_arch = "x86_64"))]
+ #[allow(unused)]
+ #[inline(always)]
+ fn zeroing_idxs<const N: usize>(idxs: Simd<u8, N>) -> Simd<u8, N> {
+--- a/library/portable-simd/crates/core_simd/src/vendor.rs
++++ b/library/portable-simd/crates/core_simd/src/vendor.rs
+@@ -18,7 +18,7 @@
+ }
+ 
+ /// Conversions to x86's SIMD types.
+-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++#[cfg(any(all(target_arch = "x86", not(target_pointer_width = "16")), target_arch = "x86_64"))]
+ mod x86;
+ 
+ #[cfg(target_arch = "wasm32")]

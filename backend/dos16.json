@@ -1,0 +1,20 @@
+{
+  "llvm-target": "i386-unknown-none",
+  "data-layout": "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16",
+  "arch": "x86",
+  "rustc-abi": "softfloat",
+  "features": "-mmx,-sse,+soft-float",
+  "target-pointer-width": 16,
+  "target-c-int-width": 16,
+  "os": "none",
+  "cpu": "8086",
+  "linker-flavor": "gnu-lld",
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "atomic-cas": false,
+  "max-atomic-width": 0,
+  "disable-redzone": true,
+  "executables": true,
+  "singlethread": true,
+  "exe-suffix": ".exe"
+}
