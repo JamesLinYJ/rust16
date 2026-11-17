@@ -2,8 +2,8 @@
 //! The monitor itself is an independently linked i386 Rust image at offset 0x800.
 use iced_x86::{Code, IcedError, Instruction, MemoryOperand, Register, code_asm::*};
 use std::{env, fs};
-mod windows;
 mod console;
+mod windows;
 type Result<T> = std::result::Result<T, IcedError>;
 
 fn caller() -> Result<Vec<u8>> {
@@ -154,6 +154,25 @@ fn upper_caller() -> Result<Vec<u8>> {
     a.pop(bp)?;
     a.retf()?;
     s.public("dos_upper_request");
+    s.emit(&a.assemble(0)?);
+    // Near input/output packet holds CX and DX for the AT real-time clock.
+    let mut a = CodeAssembler::new(16)?;
+    a.push(bp)?;
+    a.mov(bp, sp)?;
+    a.push(si)?;
+    a.mov(si, word_ptr(bp + 6))?;
+    a.mov(ax, word_ptr(bp + 8))?;
+    a.mov(cx, word_ptr(si))?;
+    a.mov(dx, word_ptr(si + 2))?;
+    a.clc()?;
+    a.int(0x1a)?;
+    a.mov(word_ptr(si), cx)?;
+    a.mov(word_ptr(si + 2), dx)?;
+    a.sbb(ax, ax)?;
+    a.pop(si)?;
+    a.pop(bp)?;
+    a.retf()?;
+    s.public("dos_rtc");
     s.emit(&a.assemble(0)?);
     Ok(s.finish().expect("encode DOS upper arena ABI"))
 }

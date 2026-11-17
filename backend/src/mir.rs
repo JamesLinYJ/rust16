@@ -160,6 +160,31 @@ impl<'tcx> Frame<'_, 'tcx> {
             let stride = layout(self.tcx, value.ty(self.body, self.tcx))?
                 .size
                 .bytes();
+            if count == 0 || stride == 0 {
+                return Ok(());
+            }
+            if stride == 4
+                && let Operand::Constant(c) = value
+                && let Some(scalar) = c
+                    .const_
+                    .try_eval_scalar_int(self.tcx, ty::TypingEnv::fully_monomorphized())
+            {
+                self.addr(p)?;
+                self.code.emit(&[0x89, 0xdf, 0x1e, 0x07]); // DI=destination, ES=DS
+                let bits = scalar.to_bits_unchecked();
+                if bits == 0 {
+                    self.code.emit(&[0x31, 0xc0, 0xb9]);
+                    self.code.word((count * 2) as u16);
+                    self.code.emit(&[0xf3, 0xab]);
+                } else {
+                    self.immediate(bits, 4)?;
+                    self.code.emit(&[0xb9]);
+                    self.code.word(count as u16);
+                    // Repeat the low and high halves in little-endian order.
+                    self.code.emit(&[0xab, 0x92, 0xab, 0x92, 0xe2, 0xfa]);
+                }
+                return Ok(());
+            }
             if stride > 2 {
                 self.addr(p)?;
                 self.code.emit(&[0x53]);
@@ -267,7 +292,15 @@ impl<'tcx> Frame<'_, 'tcx> {
             let (at, base) = address(self.tcx, self.body, &self.slots, p)?;
             let cx = LayoutCx::new(self.tcx, ty::TypingEnv::fully_monomorphized());
             let data = match &**kind {
-                AggregateKind::Tuple | AggregateKind::Array(_) => base,
+                // A wide near pointer contains a data address and target-sized metadata.
+                // Thin pointers have a scalar layout and an unused unit operand.
+                AggregateKind::RawPtr(_, _) if base.fields.count() == 0 => {
+                    self.operand(&fields[rustc_abi::FieldIdx::from_u32(0)])?;
+                    return transfer(self.code, at, base.size.bytes(), true);
+                }
+                AggregateKind::Tuple | AggregateKind::Array(_) | AggregateKind::RawPtr(_, _) => {
+                    base
+                }
                 AggregateKind::Adt(_, variant, _, _, None) => {
                     if let Some((off, len, bits)) = tag_value(base, self.tcx, *variant) {
                         self.immediate(bits, len)?;
@@ -432,6 +465,19 @@ impl<'tcx> Frame<'_, 'tcx> {
                 self.code.word(count as u16);
             }
             Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) => {
+                if let Some((ProjectionElem::Deref, prefix)) = p.projection.split_last() {
+                    let pointer = Place {
+                        local: p.local,
+                        projection: self.tcx.mk_place_elems(prefix),
+                    };
+                    if layout(self.tcx, pointer.ty(self.body, self.tcx).ty)?
+                        .size
+                        .bytes()
+                        == 4
+                    {
+                        return self.place(pointer, 0x8b);
+                    }
+                }
                 self.addr(*p)?;
                 self.code.emit(&[0x89, 0xd8]);
             }
@@ -740,6 +786,14 @@ pub fn function<'tcx>(
                 StatementKind::Assign(stmt) => {
                     let (p, r) = &**stmt;
                     f.assign(*p, r)?;
+                }
+                StatementKind::Intrinsic(intrinsic)
+                    if matches!(
+                        intrinsic.as_ref(),
+                        rustc_middle::mir::NonDivergingIntrinsic::Assume(_)
+                    ) =>
+                {
+                    ()
                 }
                 StatementKind::StorageLive(_)
                 | StatementKind::StorageDead(_)
