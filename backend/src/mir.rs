@@ -474,7 +474,7 @@ impl<'tcx> Frame<'_, 'tcx> {
                     _ => return Err("uninhabited discriminant".into()),
                 }
             }
-            Rvalue::Cast(CastKind::IntToInt, val, to) => {
+            Rvalue::Cast(CastKind::IntToInt | CastKind::PointerExposeProvenance, val, to) => {
                 self.operand(val)?;
                 let from = val.ty(self.body, self.tcx);
                 let width = layout(self.tcx, from)?.size.bytes();
