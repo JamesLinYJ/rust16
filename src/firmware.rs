@@ -2,7 +2,10 @@
 //! On entry DL holds the BIOS disk. DS = SS names the kernel's data and stack segment.
 use crate::machine::Segment;
 
-const KERNEL_STACK: u16 = 0x6000;
+// Immediately below the first application MCB at 3fff:0000. The low 4 KiB
+// holds the near literal pool, the next 2 KiB holds AUTOEXEC, and the stack
+// grows down from 3fff:0000 without occupying the conventional process arena.
+const KERNEL_STACK: u16 = 0x3900;
 
 pub(crate) fn function(s: &mut Segment, name: &str, body: &[u8]) {
     s.public(name);
@@ -17,8 +20,9 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
     s.emit(&[0xfa, 0xb8]);
     s.word(KERNEL_STACK);
     s.emit(&[
-        0x8e, 0xd0, 0xbc, 0xf0, 0xff, 0x8e, 0xd8, 0x88, 0x16, 0, 0, 0xfc, 0xfb,
+        0x8e, 0xd0, 0xbc, 0xe0, 0x6f, 0x8e, 0xd8, 0x88, 0x16, 0, 0, 0xfc, 0xfb,
     ]);
+    s.emit(&[0xc7, 0x06, 2, 0, 0, 0]); // No suspended EXEC (also after a warm boot).
     s.emit(&[0x31, 0xd2, 0xb8, 0xe3, 0, 0xcd, 0x14]); // COM1, 9600 8N1
     crate::literals::init(&mut s);
     s.far_call("main16");
@@ -89,10 +93,16 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
     // Run a COM in its own 64 KiB segment. Termination restores the suspended
     // kernel stack through the installed INT 20h / INT 21h gates.
     s.public("bios_run");
-    s.emit(&[
-        0x55, 0x89, 0xe5, 0x89, 0x26, 2, 0, 0x31, 0xc0, 0x8e, 0xc0, 0xfa,
-    ]);
-    s.emit(&[0x8b, 0x46, 14, 0xa3, 4, 0]);
+    s.emit(&[0x55, 0x89, 0xe5]);
+    // Each suspended EXEC keeps its own kernel-stack pointer, volume and caller frame.
+    for field in [2, 4, 6, 8] {
+        s.emit(&[0xff, 0x36, field, 0]);
+    }
+    s.emit(&[0x89, 0x26, 2, 0, 0x31, 0xc0, 0x8e, 0xc0, 0xfa]);
+    s.emit(&[0x8b, 0x46, 16, 0xa3, 4, 0]);
+    // An EXEC inherits the live IVT, including hooks installed by its parent.
+    s.emit(&[0x83, 0x7e, 0xfe, 0]);
+    s.branch(0x75, "run-ready");
     for vector in [0x20u16, 0x21] {
         // position-independent offset from a near CALL and a relative ADD
         s.relative(0xe8, &format!("vector-{vector}"));
@@ -106,14 +116,17 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
         s.word(vector * 4 + 2);
         // Patch after the handler offset is known.
     }
+    s.label("run-ready");
     s.emit(&[
-        0x8b, 0x56, 12, 0x8b, 0x4e, 10, 0x8b, 0x76, 8, 0x8b, 0x7e, 6, 0xb8, 0, 0x40, 0x8e, 0xd8,
+        0x8b, 0x56, 12, 0x8b, 0x4e, 10, 0x8b, 0x76, 8, 0x8b, 0x7e, 6, 0x8b, 0x46, 14, 0x8e, 0xd8,
         0x8e, 0xc0, 0x8e, 0xd6, 0x89, 0xfc, 0x52, 0x51, 0x31, 0xc0, 0xfb, 0xfc, 0xcb,
     ]);
     let int21 = s.bytes.len();
     // INT 21h AH=02h,09h and 4Ch. IRET preserves caller FLAGS.
     s.emit(&[0x80, 0xfc, 0x4c]);
     s.branch(0x74, "terminate");
+    s.emit(&[0x84, 0xe4]);
+    s.branch(0x74, "exit-zero");
     if kernel {
         // Snapshot the caller, then run the DOS service on the suspended kernel
         // stack. Rust modifies the saved registers and CF in the interrupt frame.
@@ -150,14 +163,18 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
     s.emit(&[
         0xb4, 0x0e, 0xbb, 7, 0, 0xcd, 0x10, 0x59, 0x5a, 0x5b, 0x58, 0xc3,
     ]);
+    s.label("exit-zero");
+    let exit_zero = s.bytes.len();
+    s.emit(&[0x31, 0xc0]); // INT 20h and INT 21h/AH=00h have no status argument.
     s.label("terminate");
-    let terminate = s.bytes.len();
     s.emit(&[0xfa, 0xba]);
     s.word(KERNEL_STACK);
-    s.emit(&[
-        0x8e, 0xda, 0x8e, 0xd2, 0x8b, 0x26, 2, 0, 0xfc, 0xfb, 0x5d, 0xcb,
-    ]);
-    for (vector, handler) in [(0x20u16, terminate), (0x21, int21)] {
+    s.emit(&[0x8e, 0xda, 0xa2, 10, 0, 0x8e, 0xd2, 0x8b, 0x26, 2, 0]);
+    for field in [8, 6, 4, 2] {
+        s.emit(&[0x8f, 0x06, field, 0]);
+    }
+    s.emit(&[0xfc, 0xfb, 0x5d, 0xcb]);
+    for (vector, handler) in [(0x20u16, exit_zero), (0x21, int21)] {
         let from = s.label_offset(&format!("vector-{vector}"));
         let imm = from + 2;
         s.bytes[imm..imm + 2].copy_from_slice(&((handler - from) as u16).to_le_bytes());
@@ -176,6 +193,9 @@ pub fn object(kernel: bool) -> Result<Vec<u8>, String> {
     }
     s.public("resident_io");
     s.emit(&[0xb8, 0xa0, 0x37, 0x8e, 0xc0, 0x26, 0xff, 0x2e, 0, 0]);
+    if kernel {
+        crate::firmware_mux::emit(&mut s, KERNEL_STACK);
+    }
     crate::real_io::emit(&mut s);
     crate::literals::emit(&mut s);
     s.finish()

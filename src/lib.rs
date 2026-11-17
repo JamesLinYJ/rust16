@@ -3,6 +3,7 @@
 mod bios_disk;
 pub mod boot_record;
 pub mod firmware;
+mod firmware_mux;
 mod literals;
 pub mod machine;
 mod real_io;

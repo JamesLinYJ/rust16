@@ -2,6 +2,8 @@
 //! The monitor itself is an independently linked i386 Rust image at offset 0x800.
 use iced_x86::{Code, IcedError, Instruction, MemoryOperand, Register, code_asm::*};
 use std::{env, fs};
+mod windows;
+mod console;
 type Result<T> = std::result::Result<T, IcedError>;
 
 fn caller() -> Result<Vec<u8>> {
@@ -27,6 +29,7 @@ fn caller() -> Result<Vec<u8>> {
     let mut s = rust16::machine::Segment::default();
     s.public("device_call");
     s.emit(&a.assemble(0)?);
+    console::adapter(&mut s)?;
     Ok(s.finish().expect("encode DOS device-call OMF"))
 }
 
@@ -174,12 +177,12 @@ const STRATEGY: usize = 0x40;
 const INTERRUPT: usize = 0x60;
 const RESUME: usize = 0x200;
 const PROTECTED: usize = 0x240;
-const STACK_TOP: u32 = 0xd000;
+const STACK_TOP: u32 = 0xe000;
 
 fn image() -> Result<Vec<u8>> {
     let mut b = vec![0u8; 0x800];
     b[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-    b[4..6].copy_from_slice(&0x8000u16.to_le_bytes());
+    b[4..6].copy_from_slice(&0xc000u16.to_le_bytes()); // character device with IOCTL
     b[6..8].copy_from_slice(&(STRATEGY as u16).to_le_bytes());
     b[8..10].copy_from_slice(&(INTERRUPT as u16).to_le_bytes());
     b[10..18].copy_from_slice(b"EMMXXXX0");
@@ -188,10 +191,25 @@ fn image() -> Result<Vec<u8>> {
     a.int(0xe6)?;
     a.iret()?;
     place(&mut b, IRET_ENTRY, IRET_ENTRY + 10, &mut a)?;
+    let mut command = CodeAssembler::new(16)?;
+    command.int(0xe6)?;
+    command.ret()?;
+    place(&mut b, 0x24, 0x2a, &mut command)?;
     let mut x = CodeAssembler::new(16)?;
     x.int(0xe6)?;
     x.retf()?;
     place(&mut b, 0x32, 0x36, &mut x)?;
+    // XMS 3.0 Appendix A. Windows patches the five-byte hook with a FAR JMP
+    // and chains to the entry immediately following it.
+    let mut hook = CodeAssembler::new(16)?;
+    let mut dispatch = hook.create_label();
+    hook.jmp(dispatch)?;
+    hook.nop()?;
+    hook.nop()?;
+    hook.nop()?;
+    hook.set_label(&mut dispatch)?;
+    hook.jmp(0x32u64)?;
+    place(&mut b, 0x12, IRET_ENTRY, &mut hook)?;
     let mut x = CodeAssembler::new(16)?;
     x.int(0xe6)?;
     x.iret()?;
@@ -219,7 +237,18 @@ fn image() -> Result<Vec<u8>> {
     a.les(bx, dword_ptr(PACKET))?;
     a.cmp(byte_ptr(bx + 2).es(), 0)?;
     a.je(init)?;
+    // While the VMM owns the processor it may query output status in real mode.
+    let mut monitor = a.create_label();
+    a.smsw(ax)?;
+    a.test(al, 1)?;
+    a.jne(monitor)?;
     a.mov(word_ptr(bx + 3).es(), 0x8103)?;
+    a.cmp(byte_ptr(bx + 2).es(), 10)?;
+    a.jne(done)?;
+    a.mov(word_ptr(bx + 3).es(), 0x100)?;
+    a.jmp(done)?;
+    a.set_label(&mut monitor)?;
+    a.call(0x24u64)?;
     a.jmp(done)?;
     a.set_label(&mut init)?;
     // On a 286, the high FLAGS bits cannot be set in real mode.
@@ -270,7 +299,7 @@ fn image() -> Result<Vec<u8>> {
     a.mov(ax, cs)?;
     a.test(ax, 255)?;
     a.jne(skip)?; // physical paging structures align to 4 KiB
-    a.add(ax, (STACK_TOP / 16) as i32)?;
+    a.add(ax, ((STACK_TOP + 0x1000) / 16) as i32)?;
     a.cmp(ax, word_ptr(bx + 16).es())?;
     a.ja(skip)?;
     a.mov(ah, 0x88)?;
@@ -279,6 +308,7 @@ fn image() -> Result<Vec<u8>> {
     a.cmp(ax, 128)?;
     a.jb(skip)?;
     a.mov(word_ptr(EXT_KIB), ax)?;
+    a.call(0x600u64)?;
     // Prefer the BIOS A20 service. Verify using reversible writes at two alias addresses.
     a.mov(ax, 0x2401)?;
     a.int(0x15)?;
@@ -299,7 +329,7 @@ fn image() -> Result<Vec<u8>> {
     a.mov(word_ptr(LOAD_SEG), ax)?;
     a.mov(word_ptr(REAL_SS), ss)?;
     a.mov(word_ptr(REAL_SP), sp)?;
-    a.add(ax, (STACK_TOP / 16) as i32)?;
+    a.add(ax, ((STACK_TOP + 0x1000) / 16) as i32)?;
     a.mov(word_ptr(bx + 14).es(), 0)?;
     a.mov(word_ptr(bx + 16).es(), ax)?;
     a.mov(word_ptr(bx + 3).es(), 0x100)?;
@@ -383,7 +413,96 @@ fn image() -> Result<Vec<u8>> {
         b[GDT as usize + offset..GDT as usize + offset + 8].copy_from_slice(&desc.to_le_bytes());
     }
     vcpi_entries(&mut b)?;
+    physical_caps(&mut b)?;
+    windows::entries(&mut b)?;
     Ok(b)
+}
+
+// Called in real mode, after both 386 and DOS load-boundary checks. The final
+// resident page is E820 scratch until the monitor publishes the XMS table.
+fn physical_caps(b: &mut [u8]) -> Result<()> {
+    let mut a = CodeAssembler::new(16)?;
+    let mut done = a.create_label();
+    let mut fallback = a.create_label();
+    let mut map = a.create_label();
+    let mut next = a.create_label();
+    let mut complete = a.create_label();
+    a.pushad()?;
+    windows::save_real_tables(&mut a)?;
+    a.push(es)?;
+    a.pushfd()?;
+    a.pop(eax)?;
+    a.mov(ecx, eax)?;
+    a.xor(eax, 1 << 21)?;
+    a.push(eax)?;
+    a.popfd()?;
+    a.pushfd()?;
+    a.pop(eax)?;
+    a.push(ecx)?;
+    a.popfd()?;
+    a.xor(eax, ecx)?;
+    a.test(eax, 1 << 21)?;
+    a.je(done)?;
+    a.xor(eax, eax)?;
+    a.cpuid()?;
+    a.test(eax, eax)?;
+    a.je(done)?;
+    a.mov(eax, 1)?;
+    a.cpuid()?;
+    a.and(edx, 0x48)?; // PAE and PSE
+    a.cmp(edx, 0x48)?;
+    a.jne(done)?;
+    a.mov(eax, 0x80000000u32)?;
+    a.cpuid()?;
+    a.cmp(eax, 0x80000008u32)?;
+    a.jb(fallback)?;
+    a.mov(eax, 0x80000008u32)?;
+    a.cpuid()?;
+    a.jmp(map)?;
+    a.set_label(&mut fallback)?;
+    a.mov(al, 36)?;
+    a.set_label(&mut map)?;
+    a.mov(byte_ptr(0x3c0), al)?;
+    a.push(cs)?;
+    a.pop(es)?;
+    a.mov(di, STACK_TOP as u16 as i32)?;
+    a.xor(ebx, ebx)?;
+    a.set_label(&mut next)?;
+    a.mov(dword_ptr(di + 20).es(), 1)?;
+    a.mov(ecx, 24)?;
+    a.mov(edx, 0x534d4150)?;
+    a.mov(eax, 0xe820)?;
+    a.push(ds)?;
+    a.push(es)?;
+    a.push(di)?;
+    a.int(0x15)?;
+    a.pop(di)?;
+    a.pop(es)?;
+    a.pop(ds)?;
+    a.jb(done)?;
+    a.cmp(eax, 0x534d4150)?;
+    a.jne(done)?;
+    let mut valid = a.create_label();
+    a.cmp(ecx, 24)?;
+    a.jae(valid)?;
+    a.cmp(ecx, 20)?;
+    a.jne(done)?;
+    a.mov(dword_ptr(di + 20).es(), 1)?;
+    a.set_label(&mut valid)?;
+    a.add(di, 24)?;
+    a.test(ebx, ebx)?;
+    a.je(complete)?;
+    a.cmp(di, STACK_TOP as i32 + 64 * 24)?;
+    a.jb(next)?;
+    a.jmp(done)?; // truncated map
+    a.set_label(&mut complete)?;
+    a.sub(di, STACK_TOP as i32)?;
+    a.mov(word_ptr(0x3c2), di)?;
+    a.set_label(&mut done)?;
+    a.pop(es)?;
+    a.popad()?;
+    a.ret()?;
+    place(b, 0x600, 0x700, &mut a)
 }
 
 // The first host descriptor supplied by DE01h addresses this header in both
@@ -488,7 +607,7 @@ fn vcpi_entries(b: &mut [u8]) -> Result<()> {
     a.set_label(&mut invalid)?;
     a.mov(ah, 0x84)?;
     a.retf()?;
-    place(b, 0x480, 0x800, &mut a)
+    place(b, 0x480, 0x600, &mut a)
 }
 
 fn main() {
@@ -496,13 +615,14 @@ fn main() {
     assert_eq!(
         args.len(),
         3,
-        "rust16-device caller|header|client|upper OUTPUT"
+        "rust16-device caller|header|client|upper|winprobe OUTPUT"
     );
     let bytes = match args[1].as_str() {
         "caller" => caller(),
         "client" => client(),
         "upper" => upper_caller(),
         "header" => image(),
+        "winprobe" => windows::probe(),
         _ => panic!("unknown output"),
     }
     .expect("encode x86 architecture adapter");
