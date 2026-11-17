@@ -40,13 +40,15 @@ pub fn object() -> Result<Vec<u8>, String> {
     s.emit(&[0xb8, 12, 0x4c, 0xcd, 0x21]);
     // AX = bank ID. ES = allocated segment. DX = largest legal byte offset.
     s.label("bank");
-    s.emit(&[0x83, 0xf8, 10]);
+    s.emit(&[0x83, 0xf8, 11]);
     s.branch(0x73, "bad_bank");
     s.emit(&[
         0x89, 0xc6, 0xd1, 0xe6, 0xbb, 0, 4, 0xba, 0xff, 0x3f, 0x83, 0xf8, 1,
     ]);
     s.branch(0x76, "large");
     s.emit(&[0x83, 0xf8, 6]);
+    s.branch(0x74, "large");
+    s.emit(&[0x83, 0xf8, 10]);
     s.branch(0x75, "lookup");
     s.label("large");
     s.emit(&[0xbb, 0, 0x10, 0xba, 0xff, 0xff]);

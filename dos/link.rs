@@ -24,12 +24,13 @@ fn getidx() -> u16 {
     set(60, p + 2);
     return (a & 127) * 256 + fetch(0, p + 1);
 }
-// Two 60 KiB banks hold the segmented load image. Normalize paragraph:offset
+// Three 60 KiB banks hold the segmented load image. Normalize paragraph:offset
 // before choosing the backing bank, including fixups across a bank boundary.
 fn image_byte(base: u16, at: u16, value: u16) -> u16 {
     let para: u16 = base + at / 16;
     if para < 3840 { save(1, para * 16 + at % 16, value); }
-    else { save(6, (para - 3840) * 16 + at % 16, value); }
+    else if para < 7680 { save(6, (para - 3840) * 16 + at % 16, value); }
+    else { save(10, (para - 7680) * 16 + at % 16, value); }
     return 0;
 }
 fn image_word(base:u16, at:u16, value:u16)->u16 {
@@ -73,7 +74,7 @@ fn module(ai: u16, pass: u16) -> u16 {
                 fail(52);
             }
             length = word(0, q + 1);
-            if length > 65000 || base + (length + 15) / 16 > 7680 {
+            if length > 65000 || base + (length + 15) / 16 > 11520 {
                 fail(53);
             }
             ns = 1;
@@ -229,7 +230,11 @@ pub fn main16() -> u16 {
     setw(0,14,img); setw(0,16,16384); setw(0,20,st(54)); setw(0,22,st(52)); setw(0,24,28);
     moveb(9,0,0,28,n*4);
     output(ai+1,0,hdr*16);
-    if img > 3840 {append(ai+1,1,61440);append(ai+1,6,(img-3840)*16);}
+    if img > 7680 {
+        append(ai+1,1,61440);
+        append(ai+1,6,61440);
+        append(ai+1,10,(img-7680)*16);
+    } else if img > 3840 {append(ai+1,1,61440);append(ai+1,6,(img-3840)*16);}
     else {append(ai+1,1,img*16);}
     return 0;
 }

@@ -146,3 +146,49 @@ fn cpu_encodings_and_linker_diagnostics() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn linker_preserves_far_relocation_across_third_image_bank() {
+    use rust16::machine::Segment;
+    let dir = std::env::temp_dir().join(format!("rust16-bank-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let full = dir.join("full.obj");
+    let short = dir.join("short.obj");
+    for (path, count) in [(&full, 40960), (&short, 40944)] {
+        let mut pad = Segment::default();
+        pad.emit(&vec![0xa5; count]);
+        fs::write(path, pad.finish().unwrap()).unwrap();
+    }
+    let tail = dir.join("tail.obj");
+    let mut code = Segment::default();
+    code.public("_start");
+    code.emit(&[0x90; 12]);
+    code.far_call("destination");
+    code.public("destination");
+    code.emit(&[0xcb]);
+    fs::write(&tail, code.finish().unwrap()).unwrap();
+    let exe = dir.join("cross.exe");
+    let link = |pads: &[&std::path::PathBuf]| {
+        Command::new(env!("CARGO_BIN_EXE_link16"))
+            .args(pads)
+            .arg(&tail)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+    };
+    assert!(link(&[&full, &full, &short]).success());
+    let mz = fs::read(&exe).unwrap();
+    let w = |i: usize| u16::from_le_bytes([mz[i], mz[i + 1]]);
+    let header = usize::from(w(8)) * 16;
+    assert_eq!((w(6), w(28), w(30)), (1, 15, 7679));
+    assert_eq!(mz.len(), header + 122896);
+    assert_eq!(
+        &mz[header + 122876..header + 122882],
+        &[0x9a, 17, 0, 0xff, 0x1d, 0xcb]
+    );
+    assert!(mz[header..header + 122864].iter().all(|&x| x == 0xa5));
+    assert_eq!(link(&[&full, &full, &full, &full, &short]).code(), Some(53));
+    assert_eq!(fs::read(&exe).unwrap(), mz);
+    fs::remove_dir_all(dir).unwrap();
+}

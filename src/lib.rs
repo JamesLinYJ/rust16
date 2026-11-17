@@ -17,7 +17,7 @@ struct Context {
 }
 thread_local! {static CTX: RefCell<Context> = RefCell::new(Context::default());}
 fn valid(bank: u16, index: u16) {
-    if bank > 9 || (!matches!(bank, 0 | 1 | 6) && index >= 16384) {
+    if bank > 10 || (!matches!(bank, 0 | 1 | 6 | 10) && index >= 16384) {
         fail(12);
     }
 }
@@ -62,7 +62,7 @@ fn input(n: u16, b: u16) -> u16 {
         fail(11)
     });
     valid(b, 0);
-    let limit = if matches!(b, 0 | 1 | 6) { 65535 } else { 16383 };
+    let limit = if matches!(b, 0 | 1 | 6 | 10) { 65535 } else { 16383 };
     if data.len() >= limit {
         fail(12)
     }
