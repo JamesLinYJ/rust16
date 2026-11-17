@@ -15,6 +15,24 @@ impl Segment {
     pub fn word(&mut self, v: u16) {
         self.emit(&v.to_le_bytes());
     }
+    /// Encode a 16-bit [BP+disp] operand, including [BP] as disp8=0.
+    pub fn bp_operand(&mut self, opcode: u8, reg: u8, offset: i16) {
+        if let Ok(short) = i8::try_from(offset) {
+            self.emit(&[opcode, 0x46 | reg << 3, short as u8]);
+        } else {
+            self.emit(&[opcode, 0x86 | reg << 3]);
+            self.word(offset as u16);
+        }
+    }
+    /// Group 1 sign-extends imm8 before the same word operation.
+    pub fn arithmetic_word(&mut self, modrm: u8, value: u16) {
+        if let Ok(short) = i8::try_from(value as i16) {
+            self.emit(&[0x83, modrm, short as u8]);
+        } else {
+            self.emit(&[0x81, modrm]);
+            self.word(value);
+        }
+    }
     pub fn public(&mut self, name: &str) {
         self.publics.push((name.into(), self.bytes.len()));
     }

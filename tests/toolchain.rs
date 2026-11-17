@@ -1,5 +1,21 @@
 use std::{fs, path::Path, process::Command};
 
+#[test]
+fn bp_displacements_and_word_immediates_use_signed_byte_boundaries() {
+    let mut code = rust16::machine::Segment::default();
+    for offset in [-129i16, -128, 0, 127, 128] {
+        code.bp_operand(0x8d, 3, offset);
+        code.arithmetic_word(0xc4, offset as u16);
+    }
+    assert_eq!(code.bytes, [
+        0x8d, 0x9e, 0x7f, 0xff, 0x81, 0xc4, 0x7f, 0xff,
+        0x8d, 0x5e, 0x80, 0x83, 0xc4, 0x80,
+        0x8d, 0x5e, 0x00, 0x83, 0xc4, 0x00,
+        0x8d, 0x5e, 0x7f, 0x83, 0xc4, 0x7f,
+        0x8d, 0x9e, 0x80, 0x00, 0x81, 0xc4, 0x80, 0x00,
+    ]);
+}
+
 fn compile(source: &Path, object: &Path, cpu: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rust16"))
         .arg(cpu)

@@ -48,17 +48,16 @@ impl<'tcx> Frame<'_, 'tcx> {
                 };
                 self.addr(base)?;
                 let stride = layout(self.tcx, p.ty(self.body, self.tcx).ty)?.size.bytes();
-                self.code.emit(&[0x8b, 0xb6]);
-                self.code.word(self.slots.offsets[idx.as_usize()] as u16);
+                self.code
+                    .bp_operand(0x8b, 6, self.slots.offsets[idx.as_usize()]);
                 self.scale_index(stride)?;
                 self.code.emit(&[1, 0xf3]);
                 return Ok(());
             }
         }
         if let [ProjectionElem::Deref, tail @ ..] = p.projection.as_slice() {
-            self.code.emit(&[0x8b, 0x9e]);
             self.code
-                .word(self.slots.offsets[p.local.as_usize()] as u16);
+                .bp_operand(0x8b, 3, self.slots.offsets[p.local.as_usize()]);
             let mut ty = self.body.local_decls[p.local]
                 .ty
                 .builtin_deref(true)
@@ -68,16 +67,15 @@ impl<'tcx> Frame<'_, 'tcx> {
                     ProjectionElem::Field(f, t) => {
                         let off = layout(self.tcx, ty)?.fields.offset(f.as_usize()).bytes();
                         if off != 0 {
-                            self.code.emit(&[0x81, 0xc3]);
-                            self.code.word(off as u16);
+                            self.code.arithmetic_word(0xc3, off as u16);
                         }
                         ty = *t;
                     }
                     ProjectionElem::Index(index) => {
                         ty = ty.builtin_index().ok_or("index type")?;
                         let stride = layout(self.tcx, ty)?.size.bytes();
-                        self.code.emit(&[0x8b, 0xb6]);
-                        self.code.word(self.slots.offsets[index.as_usize()] as u16);
+                        self.code
+                            .bp_operand(0x8b, 6, self.slots.offsets[index.as_usize()]);
                         self.scale_index(stride)?;
                         self.code.emit(&[0x01, 0xf3]);
                     }
@@ -87,17 +85,17 @@ impl<'tcx> Frame<'_, 'tcx> {
                         ..
                     } => {
                         ty = ty.builtin_index().ok_or("index type")?;
-                        self.code.emit(&[0x81, 0xc3]);
-                        self.code
-                            .word((offset * layout(self.tcx, ty)?.size.bytes()) as u16);
+                        self.code.arithmetic_word(
+                            0xc3,
+                            (offset * layout(self.tcx, ty)?.size.bytes()) as u16,
+                        );
                     }
                     _ => return Err(format!("unsupported projection {proj:?}")),
                 }
             }
         } else {
             let (at, _) = address(self.tcx, self.body, &self.slots, p)?;
-            self.code.emit(&[0x8d, 0x9e]);
-            self.code.word(at as u16);
+            self.code.bp_operand(0x8d, 3, at);
         }
         Ok(())
     }
@@ -274,8 +272,8 @@ impl<'tcx> Frame<'_, 'tcx> {
                         Operand::Copy(src) | Operand::Move(src) => self.addr(*src)?,
                         _ => return Err("large aggregate field source".into()),
                     }
-                    self.code.emit(&[0x89, 0xde, 0x8d, 0xbe]);
-                    self.code.word((at + offset) as u16);
+                    self.code.emit(&[0x89, 0xde]);
+                    self.code.bp_operand(0x8d, 7, at + offset);
                     self.code.emit(&[0x1e, 0x07, 0xb9]);
                     self.code.word(width as u16);
                     self.code.emit(&[0xf3, 0xa4]);
@@ -689,8 +687,8 @@ pub fn function<'tcx>(
         s.word(size);
         s.emit(&[0]);
     } else {
-        s.emit(&[0x55, 0x89, 0xe5, 0x81, 0xec]);
-        s.word(size);
+        s.emit(&[0x55, 0x89, 0xe5]);
+        s.arithmetic_word(0xec, size);
     }
     let label = |bb: BasicBlock| format!("{name}/{}", bb.as_usize());
     let mut f = Frame {
@@ -701,6 +699,11 @@ pub fn function<'tcx>(
         cpu,
     };
     for (bb, data) in body.basic_blocks.iter_enumerated() {
+        let jump = |code: &mut Segment, dest: BasicBlock| {
+            if dest.as_usize() != bb.as_usize() + 1 {
+                code.relative(0xe9, &label(dest));
+            }
+        };
         f.code.label(&label(bb));
         for stmt in &data.statements {
             match &stmt.kind {
@@ -732,7 +735,7 @@ pub fn function<'tcx>(
                 }
                 f.code.emit(&[0xcb]);
             }
-            TerminatorKind::Goto { target, .. } => f.code.relative(0xe9, &label(*target)),
+            TerminatorKind::Goto { target, .. } => jump(f.code, *target),
             TerminatorKind::SwitchInt { discr, targets } => {
                 f.operand(discr)?;
                 let width = layout(tcx, discr.ty(body, tcx))?.size.bytes();
@@ -753,7 +756,7 @@ pub fn function<'tcx>(
                         f.code.label(&next);
                     }
                 }
-                f.code.relative(0xe9, &label(targets.otherwise()));
+                jump(f.code, targets.otherwise());
             }
             TerminatorKind::Call {
                 func,
@@ -798,14 +801,13 @@ pub fn function<'tcx>(
                 }
                 f.code.far_call(&super::symbol(tcx, instance));
                 if pushed != 0 {
-                    f.code.emit(&[0x81, 0xc4]);
-                    f.code.word(pushed as u16);
+                    f.code.arithmetic_word(0xc4, pushed as u16);
                 }
                 if let Some(dest) = target {
                     if !indirect && !destination.ty(body, tcx).ty.is_unit() {
                         f.place(*destination, 0x89)?;
                     }
-                    f.code.relative(0xe9, &label(*dest));
+                    jump(f.code, *dest);
                 } else {
                     f.code.far_call("rust16_abort");
                 }
