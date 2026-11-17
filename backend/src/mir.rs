@@ -604,6 +604,21 @@ impl<'tcx> Frame<'_, 'tcx> {
                 self.code.emit(&[0x89, 0xc1, 0x58]);
                 use BinOp::*;
                 match op {
+                    Offset => {
+                        let pointee = aty
+                            .builtin_deref(true)
+                            .ok_or("pointer offset needs a pointee")?;
+                        let stride = layout(self.tcx, pointee)?.size.bytes();
+                        match stride {
+                            0 => (),
+                            1 => self.code.emit(&[0x01, 0xc8]), // add ax,cx
+                            _ => {
+                                self.code.emit(&[0x89, 0xce]); // mov si,cx
+                                self.scale_index(stride)?;
+                                self.code.emit(&[0x01, 0xf0]); // add ax,si
+                            }
+                        }
+                    }
                     Add | AddUnchecked => self.code.emit(&[1, 0xc8]),
                     Sub | SubUnchecked => self.code.emit(&[0x29, 0xc8]),
                     Mul | MulUnchecked => self.code.emit(&[0xf7, 0xe1]),
