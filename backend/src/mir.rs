@@ -27,8 +27,12 @@ impl<'tcx> Frame<'_, 'tcx> {
                 }
             }
             _ if self.cpu >= 286 => {
-                self.code.emit(&[0x69, 0xf6]);
-                self.code.word(n);
+                if let Ok(short) = i8::try_from(n as i16) {
+                    self.code.emit(&[0x6b, 0xf6, short as u8]);
+                } else {
+                    self.code.emit(&[0x69, 0xf6]);
+                    self.code.word(n);
+                }
             }
             _ => {
                 self.code.emit(&[0x50, 0x52, 0xb8]);
@@ -131,11 +135,20 @@ impl<'tcx> Frame<'_, 'tcx> {
         if bytes > 4 {
             return Err(format!("constant wider than four bytes: {bytes}"));
         }
-        self.code.emit(&[0xb8]);
-        self.code.word(bits as u16);
+        if bits as u16 == 0 {
+            self.code.emit(&[0x31, 0xc0]);
+        } else {
+            self.code.emit(&[0xb8]);
+            self.code.word(bits as u16);
+        }
         if bytes > 2 {
-            self.code.emit(&[0xba]);
-            self.code.word((bits >> 16) as u16);
+            let high = (bits >> 16) as u16;
+            if high == 0 {
+                self.code.emit(&[0x31, 0xd2]);
+            } else {
+                self.code.emit(&[0xba]);
+                self.code.word(high);
+            }
         }
         Ok(())
     }
@@ -688,7 +701,9 @@ pub fn function<'tcx>(
         s.emit(&[0]);
     } else {
         s.emit(&[0x55, 0x89, 0xe5]);
-        s.arithmetic_word(0xec, size);
+        if size != 0 {
+            s.arithmetic_word(0xec, size);
+        }
     }
     let label = |bb: BasicBlock| format!("{name}/{}", bb.as_usize());
     let mut f = Frame {
@@ -745,12 +760,17 @@ pub fn function<'tcx>(
                         if width != 4 {
                             return Err("switch exceeds 32 bits".into());
                         }
-                        f.code.emit(&[0x81, 0xfa]);
-                        f.code.word((val >> 16) as u16);
+                        f.code.arithmetic_word(0xfa, (val >> 16) as u16);
                         f.code.branch(0x75, &next);
                     }
-                    f.code.emit(&[0x3d]);
-                    f.code.word(val as u16);
+                    if width == 1 {
+                        f.code.emit(&[0x3c, val as u8]);
+                    } else if val as u16 == 0 {
+                        f.code.emit(&[0x85, 0xc0]);
+                    } else {
+                        f.code.emit(&[0x3d]);
+                        f.code.word(val as u16);
+                    }
                     f.code.branch(0x74, &label(dest));
                     if width > 2 {
                         f.code.label(&next);

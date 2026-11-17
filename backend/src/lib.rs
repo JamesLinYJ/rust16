@@ -99,7 +99,7 @@ impl CodegenBackend for Dos16 {
             }
             if !standalone && seg.bytes.len() >= 16 * 1024 {
                 let complete = std::mem::take(&mut seg);
-                objects.push(complete.finish().unwrap_or_else(|e| sess.dcx().fatal(e)));
+                objects.push(complete.finish_mir().unwrap_or_else(|e| sess.dcx().fatal(e)));
             }
             let id = instance.def_id();
             let name = symbol(tcx, instance);
@@ -119,7 +119,7 @@ impl CodegenBackend for Dos16 {
                     .span_fatal(tcx.def_span(id), format!("{name}: {e}"));
             }
         }
-        objects.push(seg.finish().unwrap_or_else(|e| sess.dcx().fatal(e)));
+        objects.push(seg.finish_mir().unwrap_or_else(|e| sess.dcx().fatal(e)));
         Box::new(objects)
     }
     fn join_codegen(

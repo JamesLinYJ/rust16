@@ -1,19 +1,66 @@
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn mir_jump_relaxation_preserves_8086_ranges_and_omf_positions() {
+    use rust16::machine::Segment;
+    for gap in [127, 128] {
+        let mut code = Segment::default();
+        code.branch(0x74, "dest");
+        code.emit(&vec![0x90; gap]);
+        code.label("dest");
+        code.public("callee");
+        code.far_call("external");
+        code.relax_branches().unwrap();
+        let len = if gap == 127 { 2 } else { 5 };
+        let expected: &[u8] = if gap == 127 {
+            &[0x74, 127]
+        } else {
+            &[0x75, 3, 0xe9, 128, 0]
+        };
+        assert_eq!(&code.bytes[..len], expected);
+        assert_eq!(code.publics[0].1, gap + len);
+        assert_eq!(code.calls[0].0, gap + len + 1);
+    }
+    for gap in [126, 127] {
+        let mut code = Segment::default();
+        code.label("start");
+        code.emit(&vec![0x90; gap]);
+        code.relative(0xe9, "start");
+        code.relax_branches().unwrap();
+        assert_eq!(
+            &code.bytes[gap..],
+            if gap == 126 {
+                &[0xeb, 0x80][..]
+            } else {
+                &[0xe9, 0x7e, 0xff][..]
+            }
+        );
+    }
+    let mut cascade = Segment::default();
+    cascade.branch(0x75, "end");
+    cascade.emit(&[0x90; 124]);
+    cascade.branch(0x74, "end");
+    cascade.label("end");
+    cascade.relax_branches().unwrap();
+    assert_eq!(&cascade.bytes[..2], &[0x75, 124]);
+    assert_eq!(cascade.bytes.len(), 126);
+}
+
+#[test]
 fn bp_displacements_and_word_immediates_use_signed_byte_boundaries() {
     let mut code = rust16::machine::Segment::default();
     for offset in [-129i16, -128, 0, 127, 128] {
         code.bp_operand(0x8d, 3, offset);
         code.arithmetic_word(0xc4, offset as u16);
     }
-    assert_eq!(code.bytes, [
-        0x8d, 0x9e, 0x7f, 0xff, 0x81, 0xc4, 0x7f, 0xff,
-        0x8d, 0x5e, 0x80, 0x83, 0xc4, 0x80,
-        0x8d, 0x5e, 0x00, 0x83, 0xc4, 0x00,
-        0x8d, 0x5e, 0x7f, 0x83, 0xc4, 0x7f,
-        0x8d, 0x9e, 0x80, 0x00, 0x81, 0xc4, 0x80, 0x00,
-    ]);
+    assert_eq!(
+        code.bytes,
+        [
+            0x8d, 0x9e, 0x7f, 0xff, 0x81, 0xc4, 0x7f, 0xff, 0x8d, 0x5e, 0x80, 0x83, 0xc4, 0x80,
+            0x8d, 0x5e, 0x00, 0x83, 0xc4, 0x00, 0x8d, 0x5e, 0x7f, 0x83, 0xc4, 0x7f, 0x8d, 0x9e,
+            0x80, 0x00, 0x81, 0xc4, 0x80, 0x00,
+        ]
+    );
 }
 
 fn compile(source: &Path, object: &Path, cpu: &str) -> std::process::Output {
